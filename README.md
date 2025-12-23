@@ -1483,8 +1483,229 @@ balances[msg.sender] += msg.value; // protections par défaut actives
 
 ---
 
-### Remarques finales
+### Remarques 
 
 * Prioriser la sécurité sur de petites économies de gaz.
 * Appliquer des patterns reconnus (Checks–Effects–Interactions, `onlyOwner`, `require` sur les retours d'appels externes).
 * Considérer l'audit externe et les tests fuzzing pour détecter des cas limites.
+
+### On va proposer un fichier de correction : 
+
+#### Partie 1 : La correction de l'exercice (SafeBank)
+Voici comment réécrire le contrat UnsafeBank pour qu'il respecte les critères de sécurité (ReentrancyGuard, Checks-Effects-Interactions, pas de tx.origin).
+
+Créez le fichier `src/SafeBank.sol` :
+
+```js
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol"; // ✅ Import ReentrancyGuard
+
+contract SafeBank is Ownable, ReentrancyGuard {
+    mapping(address => uint256) public balances;
+    address public loggerAddress;
+    uint256 public withdrawalFee = 1;
+
+    constructor() Ownable(msg.sender) {}
+
+    function deposit() external payable {
+        // ✅ Protection Overflow/Underflow : On a retiré "unchecked". 
+        // Solidity 0.8+ gère cela nativement.
+        balances[msg.sender] += msg.value;
+    }
+
+    // ✅ ReentrancyGuard : Ajout du modificateur nonReentrant
+    function withdraw() external nonReentrant {
+        // 1. CHECKS (Vérifications)
+        uint256 userBalance = balances[msg.sender];
+        require(userBalance > 0, "Solde insuffisant");
+
+        // Calcule le montant après les frais
+        uint256 amountToWithdraw = userBalance - (userBalance * withdrawalFee / 100);
+
+        // 2. EFFECTS (Effets) : On met à jour l'état AVANT d'envoyer l'argent
+        balances[msg.sender] = 0;
+
+        // 3. INTERACTIONS (Interactions) : On envoie l'Ether à la fin
+        (bool sent, ) = msg.sender.call{value: amountToWithdraw}("");
+        require(sent, "Echec de l'envoi d'Ether");
+    }
+
+    function setWithdrawalFee(uint256 _newFee) external {
+        // ✅ Authentification : On remplace tx.origin par msg.sender (via onlyOwner ou check direct)
+        require(msg.sender == owner(), "Seul le proprietaire peut changer les frais");
+        
+        // ✅ Validation des entrées
+        require(_newFee <= 5, "Les frais ne peuvent pas depasser 5%");
+        withdrawalFee = _newFee;
+    }
+
+    function setLogger(address _newLogger) external onlyOwner {
+        // ✅ Validation des entrées : On vérifie que l'adresse n'est pas nulle
+        require(_newLogger != address(0), "Logger address cannot be zero");
+        loggerAddress = _newLogger;
+        
+        // ✅ Appels externes vérifiés : On vérifie le retour de .call
+        (bool success, ) = loggerAddress.call(abi.encodeWithSignature("log(string)", "Adresse du logger mise a jour"));
+        require(success, "Log failed");
+    }
+}
+```
+
+#### Partie 2 : Sécurisation de la DApp Principale (VestingWallet)
+Maintenant, appliquons votre checklist à votre projet principal. Le point crucial ici est l'ajout de SafeERC20.
+
+Pourquoi SafeERC20 ? L'interface standard IERC20 dit que transfer doit retourner un bool. Cependant, certains tokens très connus (comme l'USDT sur Ethereum) ne retournent rien (pas de booléen). Si on utilise IERC20(token).transfer(), le contrat va "revert" (échouer) avec l'USDT car il attend une valeur de retour qu'il ne reçoit pas. SafeERC20 gère ces cas bizarres pour nous.
+
+Mettre a jour `src/VestingWallet.sol`:
+
+```js
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol"; // ✅ Import SafeERC20
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+contract VestingWallet is Ownable, ReentrancyGuard {
+    // ✅ Utilisation de la librairie pour sécuriser tous les appels ERC20
+    using SafeERC20 for IERC20; 
+
+    struct VestingSchedule {
+        address beneficiary;
+        uint256 cliff;
+        uint256 duration;
+        uint256 totalAmount;
+        uint256 releasedAmount;
+    }
+
+    IERC20 public immutable token;
+    mapping(address => VestingSchedule) public vestingSchedules;
+
+    constructor(address tokenAddress) Ownable(msg.sender) {
+        // ✅ Validation des entrées
+        require(tokenAddress != address(0), "Token address cannot be zero");
+        token = IERC20(tokenAddress);
+    }
+
+    function createVestingSchedule(
+        address _beneficiary,
+        uint256 _totalAmount,
+        uint256 _cliff,
+        uint256 _duration
+    ) external onlyOwner {
+        // ✅ Validation complète des entrées
+        require(_beneficiary != address(0), "Beneficiary cannot be zero address");
+        require(_totalAmount > 0, "Amount must be > 0");
+        require(_duration > 0, "Duration must be > 0");
+        require(_cliff >= block.timestamp, "Cliff must be in the future"); // Optionnel, selon logique métier
+        require(vestingSchedules[_beneficiary].totalAmount == 0, "Schedule already exists");
+
+        // ✅ Checks-Effects-Interactions + SafeERC20
+        // On effectue le transfert (Interaction) avant l'enregistrement (Effect) ICI c'est une exception courante
+        // car on veut être sûr d'avoir les fonds avant de valider le calendrier. 
+        // Cependant, grâce à ReentrancyGuard sur les fonctions de retrait, c'est sécurisé.
+        
+        // Utilisation de safeTransferFrom au lieu de transferFrom
+        token.safeTransferFrom(msg.sender, address(this), _totalAmount);
+
+        vestingSchedules[_beneficiary] = VestingSchedule({
+            beneficiary: _beneficiary,
+            cliff: _cliff,
+            duration: _duration,
+            totalAmount: _totalAmount,
+            releasedAmount: 0
+        });
+    }
+
+    function getVestedAmount(address _beneficiary) public view returns (uint256) {
+        VestingSchedule memory schedule = vestingSchedules[_beneficiary];
+
+        if (schedule.totalAmount == 0) return 0;
+        if (block.timestamp < schedule.cliff) return 0;
+        if (block.timestamp >= schedule.cliff + schedule.duration) return schedule.totalAmount; // ✅ Overflow protection native 0.8+
+
+        uint256 timeSinceCliff = block.timestamp - schedule.cliff;
+        return (schedule.totalAmount * timeSinceCliff) / schedule.duration;
+    }
+
+    function claimVestedTokens() external nonReentrant { // ✅ ReentrancyGuard
+        VestingSchedule storage schedule = vestingSchedules[msg.sender];
+        require(schedule.totalAmount > 0, "No vesting schedule found");
+
+        uint256 vestedAmount = getVestedAmount(msg.sender);
+        uint256 claimable = vestedAmount - schedule.releasedAmount;
+        require(claimable > 0, "Nothing to claim yet");
+
+        // ✅ Checks-Effects-Interactions
+        // Effect : Mise à jour de l'état AVANT le transfert
+        schedule.releasedAmount += claimable;
+
+        // Interaction : Transfert sécurisé avec SafeERC20
+        token.safeTransfer(msg.sender, claimable);
+    }
+}
+```
+
+### On rebuild : 
+
+```bash
+enkao@workspace MINGW64 ~/Desktop/blockchain/my-counter-project (master)
+$ forge test
+[⠊] Compiling...
+[⠘] Compiling 4 files with Solc 0.8.33
+[⠃] Solc 0.8.33 finished in 628.48ms
+Compiler run successful with warnings:
+[...]
+```
+
+## On lance les tests : 
+
+
+```bash
+enkao@workspace MINGW64 ~/Desktop/blockchain/my-counter-project (master)
+$ forge test
+[⠊] Compiling...
+No files changed, compilation skipped
+
+Ran 1 test for test/VestingWallet.t.sol:VestingWalletTest
+[PASS] test_FullVestingScenario() (gas: 213395)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 457.60µs (130.20µs CPU time)
+
+Ran 2 tests for test/Counter.t.sol:CounterTest
+[PASS] testFuzz_SetNumber(uint256) (runs: 256, μ: 29133, ~: 29289)
+[PASS] test_Increment() (gas: 28783)
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 3.52ms (3.32ms CPU time)
+
+Ran 2 test suites in 9.76ms (3.98ms CPU time): 3 tests passed, 0 failed, 0 skipped (3 total tests)
+```
+
+### 🛡️ Vesting Wallet DApp & Security Audit
+
+#### 1. VestingWallet (Smart Contract)
+Un système permettant de bloquer des jetons ERC20 pour un bénéficiaire et de les libérer linéairement dans le temps.
+- **Sécurité :** Utilisation de `SafeERC20`, `ReentrancyGuard`, et Pattern Checks-Effects-Interactions.
+- **Fonctionnalités :** Création de calendrier, Cliff (période de blocage), Calcul proportionnel des gains.
+
+#### 2. SafeBank (Audit & Fix)
+Correction d'un contrat bancaire volontairement vulnérable (`UnsafeBank`).
+- **Failles corrigées :** Reentrancy, tx.origin phishing, Unchecked external calls, Overflow (via solidity 0.8+).
+
+#### 🛠️ Stack Technique
+
+- **Langage :** Solidity ^0.8.20
+- **Framework :** Foundry (Forge, Cast, Anvil)
+- **Standards :** OpenZeppelin (ERC20, Ownable, SafeERC20)
+
+✅ Sécurité implémentée
+[x] SafeERC20 pour gérer les tokens non-standards (USDT).
+[x] ReentrancyGuard pour empêcher les attaques de réentrance.
+[x] Checks-Effects-Interactions pour l'ordre des opérations.
+[x] Validation des entrées (Address 0, Montants > 0).
+
+### Autres problemes 
+J'ai rencontré un probleme lors d'un push sur github dans un job. 
+J'ai lancer : `forge fmt` pour formater le code, j'ai lancer `forge test` pour restester si tout va bien, puis, j'ai repush et ça a fonctionner. 
