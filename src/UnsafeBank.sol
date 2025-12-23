@@ -32,7 +32,7 @@ contract UnsafeBank is Ownable {
         uint256 amountToWithdraw = userBalance - (userBalance * withdrawalFee / 100);
 
         // Envoie l'Ether AVANT de mettre à jour le solde (TRES DANGEREUX)
-        (bool sent, ) = msg.sender.call{value: amountToWithdraw}("");
+        (bool sent,) = msg.sender.call{value: amountToWithdraw}("");
         require(sent, "Echec de l'envoi d'Ether");
 
         // Met à jour le solde après l'envoi

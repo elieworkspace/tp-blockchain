@@ -6,13 +6,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract VestingWallet is Ownable, ReentrancyGuard {
-    
     // Structure pour stocker les infos d'un calendrier de vesting
     struct VestingSchedule {
-        address beneficiary;    // L'employé
-        uint256 cliff;          // Date de début du déblocage (timestamp)
-        uint256 duration;       // Durée totale du vesting (en secondes)
-        uint256 totalAmount;    // Montant total alloué
+        address beneficiary; // L'employé
+        uint256 cliff; // Date de début du déblocage (timestamp)
+        uint256 duration; // Durée totale du vesting (en secondes)
+        uint256 totalAmount; // Montant total alloué
         uint256 releasedAmount; // Montant déjà retiré
     }
 
@@ -32,12 +31,10 @@ contract VestingWallet is Ownable, ReentrancyGuard {
      * @notice Crée un nouveau calendrier de vesting pour un bénéficiaire.
      * @dev L'owner doit avoir approuvé (approve) le contrat pour dépenser ses tokens avant d'appeler cette fonction !
      */
-    function createVestingSchedule(
-        address _beneficiary,
-        uint256 _totalAmount,
-        uint256 _cliff,
-        uint256 _duration
-    ) external onlyOwner {
+    function createVestingSchedule(address _beneficiary, uint256 _totalAmount, uint256 _cliff, uint256 _duration)
+        external
+        onlyOwner
+    {
         // 1. Vérifications de sécurité (Checks)
         require(_beneficiary != address(0), "Beneficiary cannot be zero address");
         require(_totalAmount > 0, "Amount must be > 0");
@@ -52,11 +49,7 @@ contract VestingWallet is Ownable, ReentrancyGuard {
 
         // 3. Enregistrement du calendrier (Effects)
         vestingSchedules[_beneficiary] = VestingSchedule({
-            beneficiary: _beneficiary,
-            cliff: _cliff,
-            duration: _duration,
-            totalAmount: _totalAmount,
-            releasedAmount: 0
+            beneficiary: _beneficiary, cliff: _cliff, duration: _duration, totalAmount: _totalAmount, releasedAmount: 0
         });
     }
 
@@ -98,7 +91,7 @@ contract VestingWallet is Ownable, ReentrancyGuard {
 
         // Combien de tokens sont "mérités" au total à cet instant ?
         uint256 vestedAmount = getVestedAmount(msg.sender);
-        
+
         // Combien peut-il retirer maintenant ? (Total mérité - Déjà retiré)
         uint256 claimable = vestedAmount - schedule.releasedAmount;
         require(claimable > 0, "Nothing to claim yet");
